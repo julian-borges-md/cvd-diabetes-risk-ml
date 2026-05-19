@@ -1,0 +1,69 @@
+# 07_render_caret_reports.R
+# Purpose: Render caret confusionMatrix printed reports as publication friendly PNGs without clipping
+# Inputs:
+#   output/logistic_regression_confusion_report_oof_youden.txt
+#   output/random_forest_confusion_report_oof_youden.txt
+# Outputs:
+#   output/Figure_5_Logistic_Regression_Confusion_Report_OOF_Youden.png
+#   output/Figure_6_Random_Forest_Confusion_Report_OOF_Youden.png
+
+suppressPackageStartupMessages({
+  library(here)
+  library(grid)
+})
+
+out_dir <- here::here("output")
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+render_text_report <- function(input_txt, output_png, fig_title) {
+  stopifnot(file.exists(input_txt))
+  
+  lines <- readLines(input_txt, warn = FALSE)
+  text_block <- paste(lines, collapse = "\n")
+  
+  # Dynamic sizing to avoid bottom clipping
+  n_lines <- length(lines)
+  # Height scales with line count; enforce sensible bounds
+  height_px <- max(1600, min(2600, 180 + n_lines * 32))
+  width_px  <- 1900
+  
+  png(output_png, width = width_px, height = height_px, res = 220)
+  grid.newpage()
+  
+  grid.rect(gp = gpar(fill = "white", col = NA))
+  
+  # Title
+  grid.text(
+    fig_title,
+    x = unit(0.03, "npc"),
+    y = unit(0.985, "npc"),
+    just = c("left", "top"),
+    gp = gpar(fontsize = 18, fontface = "bold", col = "black")
+  )
+  
+  # Text block: smaller font and higher start position to prevent clipping
+  grid.text(
+    text_block,
+    x = unit(0.03, "npc"),
+    y = unit(0.95, "npc"),
+    just = c("left", "top"),
+    gp = gpar(fontfamily = "mono", fontsize = 11, col = "black")
+  )
+  
+  dev.off()
+}
+
+render_text_report(
+  input_txt  = file.path(out_dir, "logistic_regression_confusion_report_oof_youden.txt"),
+  output_png = file.path(out_dir, "Figure_5_Logistic_Regression_Confusion_Report_OOF_Youden.png"),
+  fig_title  = "Figure 5. Confusion matrix and statistics Logistic regression pooled out of fold"
+)
+
+render_text_report(
+  input_txt  = file.path(out_dir, "random_forest_confusion_report_oof_youden.txt"),
+  output_png = file.path(out_dir, "Figure_6_Random_Forest_Confusion_Report_OOF_Youden.png"),
+  fig_title  = "Figure 6. Confusion matrix and statistics Random forest pooled out of fold"
+)
+
+cat("Rendered confusion reports to PNG figures in:\n", out_dir, "\n")
+

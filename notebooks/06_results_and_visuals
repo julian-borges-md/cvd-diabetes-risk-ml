@@ -1,0 +1,233 @@
+# 06_results_and_visuals.R
+# Purpose: Produce manuscript ready results and figures from Youden pooled out of fold artifacts
+# Inputs expected in output/:
+#   performance_metrics_oof_youden.csv
+#   chosen_thresholds_youden.csv
+#   confusion_matrix_logit_oof_youden.csv
+#   confusion_matrix_rf_oof_youden.csv
+#   oof_predictions_logit.csv
+#   oof_predictions_rf.csv
+# Outputs written to output/:
+#   Table_Model_Performance_Youden_OOF.csv
+#   Figure_5_Logistic_Regression_Confusion_Matrix_OOF_Youden.png
+#   Figure_6_Random_Forest_Confusion_Matrix_OOF_Youden.png
+#   Figure_8_ROC_Combined_OOF.png
+#   Figure_Model_Comparison_Metrics.png
+#   Results_Section_5_1_Text.txt
+
+suppressPackageStartupMessages({
+  library(here)
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+  library(pROC)
+  library(scales)
+})
+
+out_dir <- here::here("output")
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+# ----------------------------
+# Load core metrics
+# ----------------------------
+metrics_path <- file.path(out_dir, "performance_metrics_oof_youden.csv")
+thresholds_path <- file.path(out_dir, "chosen_thresholds_youden.csv")
+
+stopifnot(file.exists(metrics_path))
+stopifnot(file.exists(thresholds_path))
+
+metrics <- read_csv(metrics_path, show_col_types = FALSE)
+thresholds <- read_csv(thresholds_path, show_col_types = FALSE)
+
+# Standardize model labels for presentation
+metrics <- metrics %>%
+  mutate(
+    model_label = case_when(
+      model == "logistic_regression" ~ "Logistic regression",
+      model == "random_forest" ~ "Random forest",
+      TRUE ~ model
+    )
+  )
+
+# Save a clean table for manuscript
+table_out <- metrics %>%
+  select(model_label, auc, threshold, sensitivity, specificity, precision, recall, f1) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+write_csv(table_out, file.path(out_dir, "Table_Model_Performance_Youden_OOF.csv"))
+
+# Extract values for text
+m_logit <- metrics %>% filter(model == "logistic_regression") %>% slice(1)
+m_rf    <- metrics %>% filter(model == "random_forest") %>% slice(1)
+
+auc_logit <- as.numeric(m_logit$auc)
+auc_rf    <- as.numeric(m_rf$auc)
+
+sens_logit <- as.numeric(m_logit$sensitivity)
+spec_logit <- as.numeric(m_logit$specificity)
+
+sens_rf <- as.numeric(m_rf$sensitivity)
+spec_rf <- as.numeric(m_rf$specificity)
+
+thr_logit <- as.numeric(m_logit$threshold)
+thr_rf    <- as.numeric(m_rf$threshold)
+
+# ----------------------------
+# Confusion matrix plots
+# ----------------------------
+plot_cm <- function(input_csv, output_png, title_text) {
+  stopifnot(file.exists(input_csv))
+  cm <- read_csv(input_csv, show_col_types = FALSE)
+  
+  cm <- cm %>%
+    mutate(
+      Reference  = factor(Reference, levels = c("No", "Yes")),
+      Prediction = factor(Prediction, levels = c("No", "Yes"))
+    )
+  
+  p <- ggplot(cm, aes(x = Prediction, y = Reference, fill = Freq)) +
+    geom_tile(color = "black") +
+    geom_text(aes(label = Freq), size = 6) +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    labs(
+      title = title_text,
+      subtitle = "Pooled out of fold predictions using model specific Youden threshold",
+      x = "Predicted class",
+      y = "Observed class"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "none")
+  
+  ggsave(
+    filename = output_png,
+    plot = p,
+    width = 6,
+    height = 5,
+    dpi = 300
+  )
+}
+
+plot_cm(
+  input_csv  = file.path(out_dir, "confusion_matrix_logit_oof_youden.csv"),
+  output_png = file.path(out_dir, "Figure_5_Logistic_Regression_Confusion_Matrix_OOF_Youden.png"),
+  title_text = "Figure 5. Confusion matrix Logistic regression"
+)
+
+plot_cm(
+  input_csv  = file.path(out_dir, "confusion_matrix_rf_oof_youden.csv"),
+  output_png = file.path(out_dir, "Figure_6_Random_Forest_Confusion_Matrix_OOF_Youden.png"),
+  title_text = "Figure 6. Confusion matrix Random forest"
+)
+
+# ----------------------------
+# Combined ROC plot regenerated from OOF prediction CSVs
+# ----------------------------
+oof_logit_path <- file.path(out_dir, "oof_predictions_logit.csv")
+oof_rf_path    <- file.path(out_dir, "oof_predictions_rf.csv")
+
+stopifnot(file.exists(oof_logit_path))
+stopifnot(file.exists(oof_rf_path))
+
+oof_logit <- read_csv(oof_logit_path, show_col_types = FALSE)
+oof_rf    <- read_csv(oof_rf_path, show_col_types = FALSE)
+
+# Ensure expected columns
+stopifnot("obs" %in% names(oof_logit), "Yes" %in% names(oof_logit))
+stopifnot("obs" %in% names(oof_rf), "Yes" %in% names(oof_rf))
+
+oof_logit$obs <- factor(oof_logit$obs, levels = c("No", "Yes"))
+oof_rf$obs    <- factor(oof_rf$obs, levels = c("No", "Yes"))
+
+roc_logit <- roc(response = oof_logit$obs, predictor = oof_logit$Yes, levels = c("No", "Yes"), direction = "<", quiet = TRUE)
+roc_rf    <- roc(response = oof_rf$obs, predictor = oof_rf$Yes, levels = c("No", "Yes"), direction = "<", quiet = TRUE)
+
+roc_df <- bind_rows(
+  data.frame(
+    fpr = 1 - roc_logit$specificities,
+    tpr = roc_logit$sensitivities,
+    model = "Logistic regression"
+  ),
+  data.frame(
+    fpr = 1 - roc_rf$specificities,
+    tpr = roc_rf$sensitivities,
+    model = "Random forest"
+  )
+)
+
+p_roc <- ggplot(roc_df, aes(x = fpr, y = tpr, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  coord_equal() +
+  labs(
+    title = "Figure 8. ROC curves",
+    subtitle = "Pooled out of fold predictions across five fold cross validation",
+    x = "False positive rate",
+    y = "True positive rate",
+    color = "Model"
+  ) +
+  theme_minimal(base_size = 14)
+
+ggsave(
+  filename = file.path(out_dir, "Figure_8_ROC_Combined_OOF.png"),
+  plot = p_roc,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+# ----------------------------
+# Model comparison plot for AUC, sensitivity, specificity
+# ----------------------------
+comp <- metrics %>%
+  select(model_label, auc, sensitivity, specificity) %>%
+  tidyr::pivot_longer(cols = c(auc, sensitivity, specificity), names_to = "metric", values_to = "value") %>%
+  mutate(
+    metric = case_when(
+      metric == "auc" ~ "AUC",
+      metric == "sensitivity" ~ "Sensitivity",
+      metric == "specificity" ~ "Specificity",
+      TRUE ~ metric
+    )
+  )
+
+p_comp <- ggplot(comp, aes(x = metric, y = value, fill = model_label)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::number_format(accuracy = 0.01)) +
+  labs(
+    title = "Model performance comparison",
+    subtitle = "Pooled out of fold metrics using model specific Youden thresholds",
+    x = "",
+    y = "Value",
+    fill = "Model"
+  ) +
+  theme_minimal(base_size = 14)
+
+ggsave(
+  filename = file.path(out_dir, "Figure_Model_Comparison_Metrics.png"),
+  plot = p_comp,
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+
+# ----------------------------
+# Results text writer
+# ----------------------------
+results_text <- paste0(
+  "5.1 Model Performance\n\n",
+  "All primary performance estimates were derived from pooled out of fold predictions generated during five fold cross validation to avoid optimistic inflation.\n\n",
+  "Logistic regression achieved an AUC of ", round(auc_logit, 3),
+  " using a model specific Youden threshold of ", round(thr_logit, 3),
+  ", with sensitivity ", round(sens_logit, 3),
+  " and specificity ", round(spec_logit, 3), ".\n\n",
+  "Random forest achieved an AUC of ", round(auc_rf, 3),
+  " using a model specific Youden threshold of ", round(thr_rf, 3),
+  ", with sensitivity ", round(sens_rf, 3),
+  " and specificity ", round(spec_rf, 3), ".\n\n",
+  "Across models, the random forest demonstrated higher discrimination and higher specificity, whereas logistic regression demonstrated higher sensitivity, reflecting distinct threshold based operating profiles.\n"
+)
+
+writeLines(results_text, con = file.path(out_dir, "Results_Section_5_1_Text.txt"))
+
+cat("Done. Outputs written to:\n", out_dir, "\n")
+

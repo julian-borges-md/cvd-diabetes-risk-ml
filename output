@@ -1,0 +1,36 @@
+## Output Directory 
+
+This directory contains all artifacts generated automatically by the analysis pipeline.
+
+Files in this directory are **derived outputs only** and are not source code. They should not be edited manually. All artifacts are fully reproducible by rerunning the analysis pipeline from the project root under the same version controlled environment.
+
+---
+
+## Generated Files
+
+- **`cv_metrics.csv`**  
+  Cross validated performance metrics derived exclusively from pooled out of fold predictions, including AUC, sensitivity, and specificity for each model.
+
+- **`roc_oof.png`**  
+  Receiver operating characteristic curves computed solely from out of fold predicted probabilities under five fold cross validation.
+
+- **`rf_feature_importance.csv`**  
+  Variable importance rankings from the random forest model fitted within the cross validated pipeline.
+
+- **`auc_naive_vs_cv.csv`**  
+  Comparison of naive in sample AUC estimates versus leakage resistant out of fold AUC, included for methodological illustration only.
+
+- **`auc_naive_vs_cv.png`**  
+  Visual demonstration of optimistic performance inflation under naive evaluation compared with cross validated estimation.
+
+- **`sessionInfo.txt`**  
+  Complete R session information, including package versions and system details, to support exact reproducibility.
+
+---
+
+## Reproducibility
+
+All files in this directory are generated automatically by executing the full analysis pipeline from the project root:
+
+```bash
+Rscript -e 'renv::restore(); source("analysis/R/01_load_and_clean.R"); source("analysis/R/02_exploration.R"); source("analysis/R/03_feature_engineering.R"); source("analysis/R/04_model_training.R"); source("analysis/R/05_evaluation.R")'

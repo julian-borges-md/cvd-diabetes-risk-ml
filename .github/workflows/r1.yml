@@ -1,0 +1,124 @@
+name: Reproducible R Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  pipeline:
+    name: Run full analysis pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Debug repository structure and inputs
+        run: |
+          echo "Working directory:"
+          pwd
+          echo ""
+          echo "Top level files:"
+          ls -la
+          echo ""
+          echo "Notebooks folder:"
+          ls -la notebooks || true
+          echo ""
+          echo "Analysis R folder:"
+          ls -la analysis/R || true
+          echo ""
+          echo "Data folder (max depth 4):"
+          find data -maxdepth 4 -type f | sort || true
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.3.2"
+          use-public-rspm: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libxml2-dev \
+            build-essential \
+            gfortran \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libharfbuzz-dev \
+            libfribidi-dev
+
+      - name: Create output directory
+        run: mkdir -p output
+
+      - name: Restore R environment with renv if lockfile exists
+        run: |
+          Rscript -e 'cat("R version:\n"); print(R.version.string)'
+          Rscript -e 'if (!file.exists("renv.lock")) { message("No renv.lock found. Skipping renv restore."); quit(status = 0) }'
+          Rscript -e 'install.packages("renv", repos = "https://cloud.r-project.org")'
+          Rscript -e 'renv::restore(prompt = FALSE)'
+
+      - name: Install minimal packages if no renv.lock
+        run: |
+          Rscript -e 'if (file.exists("renv.lock")) quit(status = 0)'
+          Rscript -e 'install.packages(c("here","readr","dplyr","tidyr","ggplot2","caret","pROC","randomForest","stringr"), repos = "https://cloud.r-project.org")'
+
+      - name: Run full analysis pipeline
+        run: |
+          set -e
+          Rscript --vanilla notebooks/01_load_and_clean.R
+          Rscript --vanilla notebooks/02_exploration.R
+          Rscript --vanilla notebooks/03_feature_engineering.R
+          Rscript --vanilla notebooks/04_model_training.R
+          Rscript --vanilla notebooks/05_evaluation.R
+          Rscript --vanilla notebooks/09_tables_confusion_matrices.R
+
+      - name: Debug list outputs
+        if: always()
+        run: |
+          echo "Output folder contents:"
+          find output -type f -maxdepth 5 | sort || true
+          echo ""
+          ls -la output || true
+
+      - name: Verify outputs (soft fail for now)
+        if: always()
+        run: |
+          echo "Verifying key outputs exist (warnings only)."
+          missing=0
+
+          check() {
+            if [ ! -f "$1" ]; then
+              echo "MISSING: $1"
+              missing=1
+            else
+              echo "OK: $1"
+            fi
+          }
+
+          check output/confusion_matrix_logit_oof_youden.csv
+          check output/confusion_matrix_rf_oof_youden.csv
+          check output/performance_metrics_oof_youden.csv
+          check output/Table_5_Logistic_Regression_Confusion_Matrix_OOF_Youden.csv
+          check output/Table_6_Random_Forest_Confusion_Matrix_OOF_Youden.csv
+          check output/Table_Confusion_Matrix_Summary_Youden_OOF.csv
+
+          if [ $missing -eq 1 ]; then
+            echo "One or more expected outputs are missing. Check logs above for root cause."
+          fi
+
+      - name: Upload outputs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-outputs
+          path: output/
+          if-no-files-found: warn

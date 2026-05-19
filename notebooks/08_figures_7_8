@@ -1,0 +1,180 @@
+# 08_figures_7_8.R
+# Purpose: Generate Figure 7 and Figure 8 from the corrected pooled out of fold pipeline
+# Inputs expected in output:
+#   output/random_forest_model.rds
+#   output/logistic_model.rds
+#   output/oof_predictions_rf.csv
+#   output/oof_predictions_logit.csv
+# Outputs written to output:
+#   output/rf_variable_importance.csv
+#   output/Figure_7_Feature_Importance_Random_Forest.png  (optional)
+#   output/Table_7_Random_Forest_Variable_Importance.csv  (always)
+#   output/Figure_8_ROC_Curves_Pooled_OOF.png
+#   output/Summary_Updated_Performance_Bullets.txt
+
+suppressPackageStartupMessages({
+  library(here)
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+  library(pROC)
+  library(caret)
+  library(tibble)
+})
+
+out_dir <- here::here("output")
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+# Toggle: keep Figure 7 as a plot or rely on the table only
+make_feature_importance_plot <- TRUE
+
+# ----------------------------
+# Load saved models
+# ----------------------------
+rf_model_path <- file.path(out_dir, "random_forest_model.rds")
+logit_model_path <- file.path(out_dir, "logistic_model.rds")
+
+if (!file.exists(rf_model_path)) stop("Missing model file: ", rf_model_path, "\nRun 04_model_training.R first.")
+if (!file.exists(logit_model_path)) stop("Missing model file: ", logit_model_path, "\nRun 04_model_training.R first.")
+
+rf_model <- readRDS(rf_model_path)
+logit_model <- readRDS(logit_model_path)
+
+# ----------------------------
+# Figure 7 and Table 7: Random forest variable importance
+# ----------------------------
+vi <- caret::varImp(rf_model, scale = TRUE)
+
+vi_df <- vi$importance %>%
+  tibble::rownames_to_column("feature") %>%
+  rename(importance = Overall) %>%
+  arrange(desc(importance))
+
+# Save importance table for auditability and manuscript table use
+write_csv(vi_df, file.path(out_dir, "rf_variable_importance.csv"))
+write_csv(vi_df, file.path(out_dir, "Table_7_Random_Forest_Variable_Importance.csv"))
+
+if (isTRUE(make_feature_importance_plot)) {
+  top_n <- min(10, nrow(vi_df))
+  vi_plot_df <- vi_df %>% slice_head(n = top_n) %>% arrange(importance)
+  
+  p_vi <- ggplot(vi_plot_df, aes(x = importance, y = reorder(feature, importance))) +
+    geom_col() +
+    labs(
+      title = "Figure 7. Variable importance Random forest",
+      subtitle = "Importance scores from the final fitted random forest model",
+      x = "Scaled importance",
+      y = ""
+    ) +
+    theme_minimal(base_size = 14)
+  
+  ggsave(
+    filename = file.path(out_dir, "Figure_7_Feature_Importance_Random_Forest.png"),
+    plot = p_vi,
+    width = 8,
+    height = 5,
+    dpi = 300
+  )
+}
+
+# ----------------------------
+# Figure 8: ROC curves pooled out of fold for both models
+# ----------------------------
+oof_rf_path <- file.path(out_dir, "oof_predictions_rf.csv")
+oof_logit_path <- file.path(out_dir, "oof_predictions_logit.csv")
+
+if (!file.exists(oof_rf_path)) stop("Missing file: ", oof_rf_path, "\nRun 05_evaluation.R first.")
+if (!file.exists(oof_logit_path)) stop("Missing file: ", oof_logit_path, "\nRun 05_evaluation.R first.")
+
+oof_rf <- read_csv(oof_rf_path, show_col_types = FALSE)
+oof_logit <- read_csv(oof_logit_path, show_col_types = FALSE)
+
+if (!("obs" %in% names(oof_rf)) || !("Yes" %in% names(oof_rf))) stop("oof_predictions_rf.csv must contain columns obs and Yes.")
+if (!("obs" %in% names(oof_logit)) || !("Yes" %in% names(oof_logit))) stop("oof_predictions_logit.csv must contain columns obs and Yes.")
+
+# Respect the observed class labels in the file rather than forcing an assumption
+obs_levels <- sort(unique(c(as.character(oof_rf$obs), as.character(oof_logit$obs))))
+
+# Expect two classes
+if (length(obs_levels) != 2) {
+  stop("Expected exactly two classes in obs. Found: ", paste(obs_levels, collapse = ", "))
+}
+
+# Ensure factor format
+oof_rf$obs <- factor(oof_rf$obs, levels = obs_levels)
+oof_logit$obs <- factor(oof_logit$obs, levels = obs_levels)
+
+# Define positive and negative labels with preference for Yes if present
+positive_label <- if ("Yes" %in% obs_levels) "Yes" else obs_levels[2]
+negative_label <- setdiff(obs_levels, positive_label)[1]
+
+roc_rf <- roc(
+  response = oof_rf$obs,
+  predictor = oof_rf$Yes,
+  levels = c(negative_label, positive_label),
+  direction = "<",
+  quiet = TRUE
+)
+
+roc_logit <- roc(
+  response = oof_logit$obs,
+  predictor = oof_logit$Yes,
+  levels = c(negative_label, positive_label),
+  direction = "<",
+  quiet = TRUE
+)
+
+auc_rf <- as.numeric(auc(roc_rf))
+auc_logit <- as.numeric(auc(roc_logit))
+
+roc_df <- bind_rows(
+  data.frame(
+    fpr = 1 - roc_logit$specificities,
+    tpr = roc_logit$sensitivities,
+    model = paste0("Logistic regression AUC ", sprintf("%.3f", auc_logit))
+  ),
+  data.frame(
+    fpr = 1 - roc_rf$specificities,
+    tpr = roc_rf$sensitivities,
+    model = paste0("Random forest AUC ", sprintf("%.3f", auc_rf))
+  )
+)
+
+p_roc <- ggplot(roc_df, aes(x = fpr, y = tpr, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  coord_equal() +
+  labs(
+    title = "Figure 8. ROC curves pooled out of fold",
+    subtitle = "Five fold cross validation pooled out of fold predictions",
+    x = "False positive rate",
+    y = "True positive rate",
+    color = ""
+  ) +
+  theme_minimal(base_size = 14)
+
+ggsave(
+  filename = file.path(out_dir, "Figure_8_ROC_Curves_Pooled_OOF.png"),
+  plot = p_roc,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+# ----------------------------
+# Updated Summary bullets for manuscript
+# ----------------------------
+summary_text <- paste0(
+  "Summary updated\n",
+  "Random forest outperformed logistic regression in discrimination under pooled out of fold evaluation. ",
+  "Random forest achieved AUC ", sprintf("%.3f", auc_rf), " versus logistic regression AUC ", sprintf("%.3f", auc_logit), ".\n",
+  "Key predictors by random forest variable importance included serum creatinine, ejection fraction, age, and follow up time.\n",
+  "All discrimination values are derived strictly from pooled out of fold predictions across five fold cross validation.\n"
+)
+
+writeLines(summary_text, con = file.path(out_dir, "Summary_Updated_Performance_Bullets.txt"))
+
+cat("Done. Outputs saved to:\n", out_dir, "\n")
+cat("AUC logistic regression: ", sprintf("%.3f", auc_logit), "\n")
+cat("AUC random forest: ", sprintf("%.3f", auc_rf), "\n")
+

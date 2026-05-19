@@ -1,0 +1,189 @@
+# 09_tables_confusion_matrices.R
+# Purpose: Produce Tables 5 and 6 derived from pooled out of fold predictions
+# Inputs expected in output:
+#   confusion_matrix_logit_oof_youden.csv
+#   confusion_matrix_rf_oof_youden.csv
+#   performance_metrics_oof_youden.csv
+# Outputs written to output:
+#   Table_5_Logistic_Regression_Confusion_Matrix_OOF_Youden.csv
+#   Table_6_Random_Forest_Confusion_Matrix_OOF_Youden.csv
+#   Table_5_Logistic_Regression_Confusion_Matrix_OOF_Youden.txt
+#   Table_6_Random_Forest_Confusion_Matrix_OOF_Youden.txt
+#   Table_Confusion_Matrix_Summary_Youden_OOF.csv
+
+suppressPackageStartupMessages({
+  library(here)
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+})
+
+out_dir <- here::here("output")
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+cm_logit_path <- file.path(out_dir, "confusion_matrix_logit_oof_youden.csv")
+cm_rf_path    <- file.path(out_dir, "confusion_matrix_rf_oof_youden.csv")
+metrics_path  <- file.path(out_dir, "performance_metrics_oof_youden.csv")
+
+if (!file.exists(cm_logit_path)) stop("Missing input: ", cm_logit_path)
+if (!file.exists(cm_rf_path))    stop("Missing input: ", cm_rf_path)
+if (!file.exists(metrics_path))  stop("Missing input: ", metrics_path)
+
+cm_logit <- read_csv(cm_logit_path, show_col_types = FALSE)
+cm_rf    <- read_csv(cm_rf_path, show_col_types = FALSE)
+metrics  <- read_csv(metrics_path, show_col_types = FALSE)
+
+# Normalize confusion matrix column names if upstream scripts differ
+normalize_cm <- function(df) {
+  nms <- names(df)
+  if (all(c("Prediction", "Reference", "Freq") %in% nms)) return(df)
+
+  # Try common alternatives
+  df2 <- df
+  names(df2) <- str_replace_all(names(df2), "^pred(iction)?$", "Prediction")
+  names(df2) <- str_replace_all(names(df2), "^ref(erence)?$", "Reference")
+  names(df2) <- str_replace_all(names(df2), "^(freq|count|n)$", "Freq")
+
+  if (!all(c("Prediction", "Reference", "Freq") %in% names(df2))) {
+    stop(
+      "Confusion matrix must contain columns Prediction, Reference, Freq. ",
+      "Found: ", paste(names(df), collapse = ", ")
+    )
+  }
+  df2
+}
+
+cm_logit <- normalize_cm(cm_logit)
+cm_rf    <- normalize_cm(cm_rf)
+
+# Helper: convert long confusion matrix into a clean 2x2 table
+make_2x2 <- function(cm_df, negative_label = "No", positive_label = "Yes") {
+  cm_df <- cm_df %>%
+    mutate(
+      Prediction = as.character(Prediction),
+      Reference  = as.character(Reference),
+      Freq       = as.integer(Freq)
+    )
+
+  # Ensure both classes exist even if one cell is missing
+  expected <- expand_grid(
+    Reference  = c(negative_label, positive_label),
+    Prediction = c(negative_label, positive_label)
+  )
+
+  cm_full <- expected %>%
+    left_join(cm_df, by = c("Reference", "Prediction")) %>%
+    mutate(Freq = replace_na(Freq, 0L))
+
+  wide <- cm_full %>%
+    mutate(
+      Prediction = factor(Prediction, levels = c(negative_label, positive_label)),
+      Reference  = factor(Reference,  levels = c(negative_label, positive_label))
+    ) %>%
+    pivot_wider(names_from = Prediction, values_from = Freq, values_fill = 0L) %>%
+    arrange(Reference) %>%
+    mutate(Row_Total = .data[[negative_label]] + .data[[positive_label]])
+
+  col_totals <- tibble(
+    Reference  = "Column_Total",
+    !!negative_label := sum(wide[[negative_label]]),
+    !!positive_label := sum(wide[[positive_label]]),
+    Row_Total = sum(wide$Row_Total)
+  )
+
+  bind_rows(wide, col_totals)
+}
+
+tab_logit <- make_2x2(cm_logit)
+tab_rf    <- make_2x2(cm_rf)
+
+# Pull key metrics to accompany tables
+required_metrics <- c("model", "auc", "threshold", "sensitivity", "specificity")
+missing_metrics <- setdiff(required_metrics, names(metrics))
+if (length(missing_metrics) > 0) {
+  stop("Metrics file is missing columns: ", paste(missing_metrics, collapse = ", "))
+}
+
+m_logit <- metrics %>% filter(model == "logistic_regression") %>% slice(1)
+m_rf    <- metrics %>% filter(model == "random_forest") %>% slice(1)
+
+if (nrow(m_logit) == 0) stop("No metrics row found for model logistic_regression in ", metrics_path)
+if (nrow(m_rf) == 0)    stop("No metrics row found for model random_forest in ", metrics_path)
+
+# Save CSV tables
+write_csv(tab_logit, file.path(out_dir, "Table_5_Logistic_Regression_Confusion_Matrix_OOF_Youden.csv"))
+write_csv(tab_rf,    file.path(out_dir, "Table_6_Random_Forest_Confusion_Matrix_OOF_Youden.csv"))
+
+# Write fixed width text tables suitable for direct manuscript paste
+write_table_txt <- function(tab, title_line, metrics_row, out_path) {
+  get_cell <- function(ref_value, col_name) {
+    tab %>% filter(Reference == ref_value) %>% pull(.data[[col_name]]) %>% { ifelse(length(.) == 0, 0, .) }
+  }
+
+  lines <- c(
+    title_line,
+    "",
+    sprintf(
+      "Threshold rule: model specific Youden threshold. AUC %.3f. Sensitivity %.3f. Specificity %.3f. Threshold %.3f.",
+      metrics_row$auc, metrics_row$sensitivity, metrics_row$specificity, metrics_row$threshold
+    ),
+    "",
+    "Observed class by predicted class counts",
+    "",
+    sprintf("%-14s %10s %10s %12s", "Observed", "Pred No", "Pred Yes", "Row Total"),
+    sprintf(
+      "%-14s %10d %10d %12d",
+      "No",
+      get_cell("No", "No"),
+      get_cell("No", "Yes"),
+      get_cell("No", "Row_Total")
+    ),
+    sprintf(
+      "%-14s %10d %10d %12d",
+      "Yes",
+      get_cell("Yes", "No"),
+      get_cell("Yes", "Yes"),
+      get_cell("Yes", "Row_Total")
+    ),
+    sprintf(
+      "%-14s %10d %10d %12d",
+      "Column Total",
+      get_cell("Column_Total", "No"),
+      get_cell("Column_Total", "Yes"),
+      get_cell("Column_Total", "Row_Total")
+    )
+  )
+
+  writeLines(lines, con = out_path)
+}
+
+write_table_txt(
+  tab = tab_logit,
+  title_line = "Table 5. Logistic regression confusion matrix from pooled out of fold predictions",
+  metrics_row = m_logit,
+  out_path = file.path(out_dir, "Table_5_Logistic_Regression_Confusion_Matrix_OOF_Youden.txt")
+)
+
+write_table_txt(
+  tab = tab_rf,
+  title_line = "Table 6. Random forest confusion matrix from pooled out of fold predictions",
+  metrics_row = m_rf,
+  out_path = file.path(out_dir, "Table_6_Random_Forest_Confusion_Matrix_OOF_Youden.txt")
+)
+
+# Also output a compact summary table aligned with Results text
+summary_tbl <- metrics %>%
+  mutate(
+    model_label = case_when(
+      model == "logistic_regression" ~ "Logistic regression",
+      model == "random_forest" ~ "Random forest",
+      TRUE ~ model
+    )
+  ) %>%
+  select(any_of(c("model_label", "auc", "threshold", "sensitivity", "specificity", "precision", "recall", "f1"))) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+write_csv(summary_tbl, file.path(out_dir, "Table_Confusion_Matrix_Summary_Youden_OOF.csv"))
+
+cat("Done. Tables saved in:\n", out_dir, "\n")
